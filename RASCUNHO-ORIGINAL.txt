@@ -1,0 +1,257 @@
+RASCUNHO ENVIADO PELO UTILIZADOR — INCOMPLETO E NÃO VALIDADO
+NÃO EXECUTAR OS COMANDOS OU TRATAR AS AFIRMAÇÕES COMO CONFIRMADAS.
+O TEXTO TERMINA A MEIO DE UM COMANDO.
+
+Boa — agora o alvo é outro. Vou montar o projeto completo para o **RMX3624 (Realme C33) build `13.C.46`**, plataforma **Unisoc `sc2355_marlin3_lite` / UMS9230 (T612)**, kernel `5.4.254-android12-9`.
+
+Três coisas antes de você executar qualquer coisa:
+
+1. **Esse kernel é exatamente o mesmo base do Realme C53 `5.4.254-android12-9`** — e nesse kernel o `MODULE_SIG_FORCE=y` está ligado. Ou seja: **KernelSU por módulo (LKM) não carrega; o caminho é Magisk com boot patchado**. Isso já está decidido, não precisa testar.
+2. O build `13.C.46` é de **08/07/2025** — patch de segurança recente. A CVE-2022-38694 vive no verificador de assinatura do `uboot`, então em tese continua válida, mas builds novas da realme às vezes trocam o `uboot`. O projeto trata isso como **hipótese a validar por readback**, não como fato.
+3. **Desbloqueio apaga tudo.** Backup antes é etapa obrigatória, não recomendação.
+
+Segue o scaffold. Nome sugerido: `rmx3624-marlin3-root` (o repo anterior de pesquisa temporária vira o braço de investigação; este é o operacional).
+
+```
+rmx3624-marlin3-root/
+├── README.md
+├── .gitignore
+├── devices/RMX3624_13.C.46.toml
+├── docs/
+│   ├── 00-perfil-do-dispositivo.md
+│   ├── 01-pre-requisitos.md
+│   ├── 02-backup-obrigatorio.md
+│   ├── 03-desbloqueio-bootloader.md
+│   ├── 04-root-magisk.md
+│   ├── 05-verificacao-pos-root.md
+│   ├── 06-restauracao-e-relock.md
+│   └── 07-troubleshooting.md
+├── files/
+│   └── mapa-de-particoes.md
+├── tools/
+│   ├── 00-setup-driver.sh
+│   ├── 10-dump-all.sh
+│   ├── 20-unlock.sh
+│   ├── 30-patch-boot.sh
+│   ├── 40-flash-root.sh
+│   └── 90-verify.sh
+└── notes/LOG.md
+```
+
+---
+
+### `README.md`
+
+```markdown
+# RMX3624 (Realme C33) — Unisoc T612 / marlin3_lite — Unlock + Root
+
+Projeto de desbloqueio de bootloader e root para o **RMX3624**, build **`RMX3624_13.C.46`**.
+
+| Campo | Valor |
+|---|---|
+| Modelo | RMX3624 (Realme C33) |
+| Build | `RMX3624_13.C.46` / `O_V1_P16` |
+| Plataforma | `sc2355_marlin3_lite` (Unisoc UMS9230 / T612) |
+| Kernel | `5.4.254-android12-9-g3bdf085cac44-ab1403` |
+| Compilação | `#1 Tue Jul 8 16:49:47 CST 2025` |
+| Android | 13 (realme UI 4.0) |
+| Armazenamento | eMMC 5.1, A/B virtual (VAB) |
+| Status | 🟡 Não iniciado — hipótese em validação |
+
+## Estratégia
+
+Desbloqueio por **CVE-2022-38694** (bypass de verificação de assinatura no `uboot` da Unisoc),
+via `spd_dump` em modo BROM. Root por **Magisk** com `boot.img` patchado, AVB desativado no `vbmeta`.
+
+KernelSU **não** é caminho aqui: `MODULE_SIG_FORCE=y` no `5.4.254` rejeita módulo não assinado
+(`insmod` → `Key was rejected by service`). Só funcionaria com rebuild completo do kernel.
+
+## Ordem de execução
+
+1. `docs/01-pre-requisitos.md` — PAC do modelo, driver, host
+2. `docs/02-backup-obrigatorio.md` — readback total antes de tocar em nada
+3. `docs/03-desbloqueio-bootloader.md` — validação da CVE + unlock
+4. `docs/04-root-magisk.md` — patch, test-boot, flash
+5. `docs/05-verificacao-pos-root.md`
+6. `docs/06-restauracao-e-relock.md` — sempre ensaiado antes
+
+## Regras do projeto
+
+- **Nunca** flashar sem checksum conferido e sem backup do slot alvo.
+- **Sempre** `fastboot boot` (test-boot) antes de `fastboot flash`.
+- Boot vai **nos dois slots** (`boot_a` e `boot_b`) — VAB alterna slot e um slot stock derruba o root.
+- Todo passo destrutivo entra em `notes/LOG.md` com saída colada.
+- Não relockar com root ativo: verde só volta com boot stock nos 2 slots.
+
+## Créditos
+
+- [TomKing062](https://github.com/TomKing062/CVE-2022-38694_unlock_bootloader) — exploit CVE-2022-38694
+- [ilyakurdyukov/spreadtrum_flash](https://github.com/ilyakurdyukov/spreadtrum_flash) — `spd_dump`
+- [Gopartner/realme-c53-unlock-root](https://github.com/Gopartner/realme-c53-unlock-root) — referência direta (RMX3760, mesmo SoC e mesmo kernel)
+- [topjohnwu/Magisk](https://github.com/topjohnwu/Magisk)
+```
+
+---
+
+### `devices/RMX3624_13.C.46.toml`
+
+```toml
+[device]
+model = "RMX3624"
+marketing = "Realme C33"
+build = "RMX3624_13.C.46"
+build_incremental = "O_V1_P16"
+kernel = "5.4.254-android12-9-g3bdfc085cac44-ab1403"
+build_date = "2025-07-08"
+android = 13
+realme_ui = "4.0"
+
+[soc]
+vendor = "unisoc"
+family = "sprd"
+platform = "ums9230"
+board = "sc2355_marlin3_lite"
+codename = "marlin3_lite"
+cores = "2xA75 + 6xA55"
+
+[storage]
+type = "emmc"
+vab = true
+slots = ["a", "b"]
+
+[unlock]
+method = "cve-2022-38694"
+fdl1_addr = "0x65000800"
+fdl2_addr = "0x9efffe00"
+exec_addr = "0x65015f08"   # confirmar contra o config do repo do exploit p/ ums9230
+uboot_partitions = ["uboot", "uboot_bak"]
+
+[root]
+method = "magisk"
+kernelsu_lkm = false        # MODULE_SIG_FORCE=y
+avb_disable_required = true
+flash_targets = ["boot_a", "boot_b"]
+
+[critical_partitions]
+# readback obrigatório antes de qualquer escrita
+backup = [
+  "boot_a", "boot_b",
+  "vbmeta_a", "vbmeta_b", "vbmeta_system", "vbmeta_vendor",
+  "uboot", "uboot_bak", "splloader", "sml", "trustos", "teecfg",
+  "dtbo_a", "dtbo_b",
+  "persist", "prodnv", "misc", "nvdata", "nvram", "modem",
+  "super",
+]
+```
+
+---
+
+### `docs/00-perfil-do-dispositivo.md`
+
+```markdown
+# Perfil do dispositivo
+
+## Identificação
+
+- `ro.product.model` = RMX3624
+- `ro.build.display.id` = RMX3624_13.C.46
+- `ro.build.version.incremental` = O_V1_P16
+- `ro.board.platform` = sc2355_marlin3_lite
+- `uname -r` = 5.4.254-android12-9-g3bdf085cac44-ab1403
+- `ro.build.date` = Tue Jul 8 16:49:47 CST 2025
+
+## Por que estes dados importam
+
+O sufixo `marlin3_lite` é a variante "lite" da plataforma marlin3 (UMS9230). Os endereços de
+carregamento do FDL e o `exec_addr` **mudam entre variantes** — usar os de outro board
+(T606/T616/T618) pode travar o handshake BROM. Sempre confirmar contra a config do SoC
+correspondente no repo do exploit antes de rodar.
+
+## Vetor de ataque
+
+CVE-2022-38694: o verificador de assinatura do `uboot` da Unisoc aceita imagem não assinada.
+Explorando, é possível executar código antes da verificação e gravar permanentemente a flag de
+unlock nos registradores OTP do SoC. Resultado: estado "orange", `fastboot flashing unlock` liberado.
+
+## Superfície de risco
+
+| Item | Risco | Mitigação |
+|---|---|---|
+| Escrita no `uboot` | Alto — brick de bootloader | backup + `uboot_bak` intacto |
+| Flag OTP | Irreversível em hardware | aceitar (não há undo real) |
+| Wipe de dados | Certo | backup prévio |
+| Slot B stock | Perda de root em troca de slot | flashar os 2 slots |
+| Anti-rollback | Médio | não descer de versão após o unlock |
+```
+
+---
+
+### `docs/01-pre-requisitos.md`
+
+```markdown
+# Pré-requisitos
+
+## Hardware / host
+
+- PC com **Linux x86_64** (recomendado) ou Windows com `spd_dump.exe`
+- Cabo USB de dados (não cabo de carga)
+- Pinça ou fio para o **test point** (plano B)
+- Bateria acima de 60%
+
+## Software
+
+```bash
+sudo apt install -y libusb-1.0-0-dev build-essential android-tools-adb android-tools-fastboot
+git clone https://github.com/TomKing062/CVE-2022-38694_unlock_bootloader
+git clone https://github.com/ilyakurdyukov/spreadtrum_flash
+cd spreadtrum_flash && make && sudo cp spd_dump /usr/local/bin/
+```
+
+Regra udev para acesso sem root (Linux):
+
+```bash
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="1782", MODE="0666"' \
+  | sudo tee /etc/udev/rules.d/99-sprd.rules
+sudo udevadm control --reload-rules
+```
+
+`1782` é o VID da Spreadtrum/Unisoc. Confirme com `lsusb` quando o aparelho estiver em BROM.
+
+## Firmware
+
+Precisa do **PAC do RMX3624 na mesma família de build** (`13.C.*`). Do PAC saem os **FDL1/FDL2
+assinados do próprio aparelho** — mais confiáveis que os genéricos que vêm no repo do exploit.
+`boot.img` e `vbmeta.img` podem sair do próprio aparelho por readback, sem PAC.
+
+## Checklist
+
+- [ ] `adb devices` lista o aparelho
+- [ ] `lsusb` mostra `1782:` em modo BROM
+- [ ] PAC baixado e com SHA256 anotado
+- [ ] `spd_dump --help` roda
+- [ ] Depuração USB ativada e autorizada
+- [ ] Conta realme/Google anotada (pós-wipe)
+```
+
+---
+
+### `docs/02-backup-obrigatorio.md`
+
+```markdown
+# Backup obrigatório
+
+**Nada é escrito antes disto terminar.** O objetivo é ter imagem byte-a-byte de tudo que o
+unlock e o root tocam, mais o que identifica o aparelho.
+
+## 1. Entrar em BROM
+
+Aparelho desligado. Segure **Volume+ e Volume−** e conecte o USB (sem Power). `lsusb` deve
+mostrar dispositivo Spreadtrum.
+
+## 2. Listar partições
+
+```bash
+spd_dump --wait 300 \
+  exec_addr 0x65015
+
+[FIM DO TEXTO RECEBIDO — INCOMPLETO]

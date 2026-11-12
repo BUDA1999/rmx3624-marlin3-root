@@ -1,0 +1,9 @@
+# Não publicar backups, imagens de firmware, dados ou logs privados
+*.img
+*.bin
+*.pac
+*.zip
+*.log
+backups/
+dumps/
+private/
