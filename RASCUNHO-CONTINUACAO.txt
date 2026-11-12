@@ -1,0 +1,337 @@
+RASCUNHO FORNECIDO PELO UTILIZADOR — NÃO VALIDADO
+NÃO EXECUTAR: CONTÉM COMANDOS DESTRUCTIVOS E ALEGAÇÕES NÃO COMPROVADAS.
+
+[Thu 2026-11-12 04:08 WAT] Não — cortou no meio do `docs/02`. Vou fechar o resto agora.
+
+### `docs/02-backup-obrigatorio.md` (continuação)
+
+```bash
+spd_dump --wait 300 \
+  exec_addr 0x65015f08 \
+  fdl fdl1-sign.bin 0x65000800 \
+  fdl fdl2-sign.bin 0x9efffe00 \
+  exec p
+```
+
+`p` imprime a tabela de partições. Salve a saída em `notes/partitions.txt` — os nomes reais
+variam por build e é deles que o loop abaixo depende.
+
+## 3. Readback
+
+```bash
+mkdir -p backups/$(date +%F)
+while read -r part; do
+  echo ">>> $part"
+  spd_dump --wait 300 exec_addr 0x65015f08 \
+    fdl fdl1-sign.bin 0x65000800 fdl fdl2-sign.bin 0x9efffe00 \
+    exec r "$part" "backups/$(date +%F)/$part.img" \
+    || echo "FALHOU: $part" | tee -a notes/falhas.txt
+done < <(grep -oP '^\s*\K[a-z0-9_]+(?=\s)' notes/partitions.txt)
+```
+
+Se `super` estourar tempo, dumpe só ele depois, isolado. Ele é grande e não é necessário para
+o rollback (o rollback usa `boot` + `vbmeta`).
+
+## 4. Verificação
+
+```bash
+cd backups/$(date +%F) && sha256sum *.img > SHA256SUMS && cd -
+```
+
+- [ ] `boot_a`, `boot_b`, `vbmeta_a`, `vbmeta_b`, `uboot`, `uboot_bak` presentes
+- [ ] `SHA256SUMS` gerado e copiado para fora do aparelho
+- [ ] Tamanhos diferentes de zero em todos os arquivos
+
+Sem isso, não prossiga.
+
+---
+
+### `docs/03-desbloqueio-bootloader.md`
+
+```markdown
+# Desbloqueio (CVE-2022-38694)
+
+## 1. Validar a vulnerabilidade no seu `uboot`
+
+Build de julho/2025 pode já ter `uboot` corrigido. Cheque antes de escrever:
+
+```bash
+strings backups/$(date +%F)/uboot.img | grep -i -E 'secure|verify|spl-unlock' | head -30
+```
+
+Se o `uboot` não tiver o fluxo de verificação que o exploit espera, o `spl-unlock` não sobe e
+o handshake trava — sinal de build corrigida. Nesse caso vá para `07-troubleshooting.md`.
+
+## 2. Executar o unlock
+
+```bash
+cd CVE-2022-38694_unlock_bootloader
+spd_dump --wait 300 \
+  exec_addr 0x65015f08 \
+  fdl fdl1-sign.bin 0x65000800 \
+  fdl fdl2-sign.bin 0x9efffe00 \
+  exec w uboot fdl2-cboot.bin reset
+```
+
+`fdl2-cboot.bin` é o `uboot` patchado do **ums9230** — pegue da pasta de config do repo, não de
+outro SoC. O `exec_addr` é o ponto mais frágil: se travar em `Waiting`, está errado para o
+`marlin3_lite`; teste os valores vizinhos da config.
+
+## 3. Confirmar
+
+```bash
+fastboot devices
+fastboot getvar unlocked        # deve retornar yes
+```
+
+No boot aparece a tela **orange state** ("device has been unlocked and can't be trusted").
+O aparelho **faz factory reset** aqui. Reconfigure, reative depuração USB.
+
+- [ ] `getvar unlocked` = `yes`
+- [ ] `getvar flash.locked` = `no`
+```
+
+---
+
+### `docs/04-root-magisk.md`
+
+```markdown
+# Root com Magisk
+
+## 1. Desativar AVB
+
+Com o bootloader destravado, o `vbmeta` ainda exige verificação e o boot patchado seria rejeitado.
+
+```bash
+fastboot --disable-verity --disable-verification flash vbmeta_a backups/<data>/vbmeta_a.img
+fastboot --disable-verity --disable-verification flash vbmeta_b backups/<data>/vbmeta_b.img
+```
+
+## 2. Patchar o boot
+
+Método on-device (mais confiável):
+
+1. Instale o Magisk (canal stable) no aparelho
+2. `adb push backups/<data>/boot_a.img /sdcard/`
+3. Magisk → Instalar → **Selecionar e patchar um arquivo** → `boot_a.img`
+4. `adb pull /sdcard/Download/magisk_patched-*.img ./boot_patched.img`
+
+Verifique antes de flashar:
+
+```bash
+magiskboot unpack boot_patched.img && magiskboot cpio ramdisk.cpio test
+```
+
+## 3. Test-boot
+
+```bash
+fastboot boot boot_patched.img
+```
+
+Se subir e o Magisk mostrar root ativo, o patch está bom. Se der bootloop aqui, **nada foi
+gravado** — só reiniciar e revisar.
+
+## 4. Flash
+
+```bash
+fastboot flash boot_a boot_patched.img
+fastboot flash boot_b boot_patched.img
+fastboot reboot
+```
+
+## 5. Primeiro boot
+
+Magisk pede reboot adicional para completar o setup. Depois: `adb shell su -c id` → `uid=0(root)`.
+
+- [ ] AVB desativado nos 2 slots
+- [ ] test-boot passou
+- [ ] `su` responde
+```
+
+---
+
+### `docs/05-verificacao-pos-root.md`
+
+```markdown
+# Verificação pós-root
+
+```bash
+adb shell getprop ro.boot.verifiedbootstate   # orange
+adb shell getprop ro.boot.flash.locked        # 0
+adb shell su -c 'id'
+adb shell su -c 'magisk -v'
+```
+
+## Integridade para apps sensíveis
+
+Apps de banco e o CRM que você usa detectam root. Configure:
+
+1. Magisk → Configurações → ativar **Zygisk**
+2. **DenyList** → adicione os apps de banco/CRM (não marque "Enforce" global)
+3. Módulo **Play Integrity Fix** para o `MEETS_DEVICE_INTEGRITY`
+4. Reboot e teste cada app
+
+Se um app ainda quebrar, isole com DenyList + reesconda o Magisk (nome aleatório do pacote).
+
+- [ ] Integridade básica passando
+- [ ] Apps críticos abrindo
+```
+
+---
+
+### `docs/06-restauracao-e-relock.md`
+
+```markdown
+# Restauração e relock
+
+## Remover root (mantendo unlock)
+
+```bash
+fastboot flash boot_a backups/<data>/boot_a.img
+fastboot flash boot_b backups/<data>/boot_b.img
+```
+
+## Voltar 100% stock (com lock)
+
+Só com boot stock nos **dois** slots, senão o AVB falha e o aparelho não boota:
+
+```bash
+fastboot flash vbmeta_a backups/<data>/vbmeta_a.img
+fastboot flash vbmeta_b backups/<data>/vbmeta_b.img
+fastboot flashing lock
+fastboot reboot
+```
+
+Verificação:
+
+```bash
+adb shell getprop ro.boot.flash.locked        # 1
+adb shell getprop ro.boot.verifiedbootstate   # green
+```
+
+Se `flashing lock` responder `Not implement.`, o relock é feito zerando o marcador em
+`miscdata` (offset 8192, 64 bytes) com o mesmo `spd_dump`. Marcador zerado = travado.
+
+> Relock também faz factory reset. E não relocke com boot patchado — brick de verificação.
+```
+
+---
+
+### `docs/07-troubleshooting.md`
+
+```markdown
+# Troubleshooting
+
+| Sintoma | Causa provável | Ação |
+|---|---|---|
+| `Waiting` eterno no `spd_dump` | `exec_addr` errado p/ `marlin3_lite` | testar endereços vizinhos da config; conferir udev |
+| Handshake cai após o FDL2 | `uboot` já corrigido | partir para EDL + PAC completo |
+| `fastboot getvar unlocked` = `no` | exploit não gravou a flag | repetir; conferir se `fdl2-cboot.bin` é de ums9230 |
+| Bootloop após flash | patch ruim ou AVB ativo | `fastboot flash boot_*` stock; refazer passo 1 do 04 |
+| Sem boot nem fastboot | brick de bootloader | test point → BROM → flash do PAC inteiro |
+| App de banco detecta root | DenyList incompleta | ver `05` |
+
+## Test point
+
+Só se BROM por botão falhar. Abra a traseira, ache o ponto marcado na placa (guia específico do
+RMX3624), feche o ponto no GND com pinça e conecte o USB mantendo o contato. `lsusb` deve
+mostrar o dispositivo. Depois é flash do PAC completo pelo ResearchDownload/`spd_dump`.
+```
+
+---
+
+### `files/mapa-de-particoes.md`
+
+```markdown
+# Mapa de partições (referência)
+
+| Partição | Conteúdo | Backup | Escrita |
+|---|---|---|---|
+| `boot_a` / `boot_b` | kernel + ramdisk | obrigatório | alvo do Magisk |
+| `vbmeta_a` / `vbmeta_b` | AVB | obrigatório | flags desativadas |
+| `uboot` / `uboot_bak` | bootloader | obrigatório | alvo do exploit |
+| `splloader`, `sml`, `trustos`, `teecfg` | estágios iniciais | sim | não |
+| `dtbo_a` / `dtbo_b` | overlays | sim | não |
+| `persist`, `prodnv` | calibração, IMEI-adjacente | **crítico** | não |
+| `misc` | flags de boot / relock | sim | relock |
+| `nvdata`, `nvram`, `modem` | rádio | sim | não |
+| `super` | system/vendor/product | opcional | não |
+
+Nomes reais vêm da tabela do próprio aparelho (`docs/02`, passo 2).
+```
+
+---
+
+### `tools/90-verify.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+d="${1:?uso: $0 <pasta-backup>}"
+echo "== estado =="
+fastboot getvar unlocked 2>&1 | tail -1
+fastboot getvar current-slot 2>&1 | tail -1
+adb shell getprop ro.boot.verifiedbootstate
+adb shell getprop ro.boot.flash.locked
+echo "== integridade do backup =="
+( cd "$d" && sha256sum -c SHA256SUMS )
+echo "== root =="
+adb shell su -c id || echo "sem root"
+```
+
+### `tools/10-dump-all.sh` e `20-unlock.sh`
+
+```bash
+# 10-dump-all.sh
+#!/usr/bin/env bash
+set -euo pipefail
+d="backups/$(date +%F)"; mkdir -p "$d"
+spd_dump --wait 300 exec_addr 0x65015f08 fdl fdl1-sign.bin 0x65000800 \
+  fdl fdl2-sign.bin 0x9efffe00 exec p | tee notes/partitions.txt
+while read -r p; do
+  spd_dump --wait 300 exec_addr 0x65015f08 fdl fdl1-sign.bin 0x65000800 \
+    fdl fdl2-sign.bin 0x9efffe00 exec r "$p" "$d/$p.img" || echo "FALHOU $p"
+done < <(grep -oP '^\s*\K[a-z0-9_]+(?=\s)' notes/partitions.txt)
+( cd "$d" && sha256sum *.img > SHA256SUMS )
+```
+
+```bash
+# 20-unlock.sh
+#!/usr/bin/env bash
+set -euo pipefail
+spd_dump --wait 300 exec_addr 0x65015f08 fdl fdl1-sign.bin 0x65000800 \
+  fdl fdl2-sign.bin 0x9efffe00 exec w uboot fdl2-cboot.bin reset
+sleep 25
+fastboot getvar unlocked
+```
+
+### `.gitignore` e `notes/LOG.md`
+
+```gitignore
+backups/
+*.img
+*.pac
+output/
+__pycache__/
+.DS_Store
+```
+
+```markdown
+# LOG
+
+Formato: `data | etapa | comando | saída resumida | resultado`
+
+## 2026-11-12
+- scaffold criado; aguardando PAC e leitura do `uboot`
+```
+
+---
+
+## Fechado
+
+O projeto está completo e executável na ordem `01 → 06`. Dois pontos continuam **abertos de propósito**, porque dependem de dado do seu aparelho:
+
+1. O `exec_addr` do `marlin3_lite` — o `0x65015f08` é o valor documentado para UMS9230 genérico, não necessariamente para a variante `lite`. Isso se confirma só na prática, e travar em `Waiting` não causa dano.
+2. Se o `uboot` do build `13.C.46` ainda aceita a CVE. Se o handshake cair depois do FDL2, é build corrigida e o caminho vira EDL + PAC completo.
+
+Quer que eu gere também um checklist interativo em HTML pra você ir marcando as etapas e registrando os hashes, ou prefere que eu comece já pelo roteiro de leitura do `uboot` para sabermos se a CVE está viva antes de você baixar PAC?
